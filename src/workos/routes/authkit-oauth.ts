@@ -55,23 +55,24 @@ export function authkitOauthRoutes(ctx: RouteContext): void {
    * There is deliberately no path-inserted form (RFC 8414 §3, `/.well-known/…/{path}`). It serves
    * an issuer that has a path component, and this issuer, like production's, has none.
    */
-  const scopesSupported = [...AUTHKIT_OAUTH_SCOPES];
-  const authMethods = [...AUTHKIT_TOKEN_ENDPOINT_AUTH_METHODS];
+  const discoveryBase = (origin: string) => ({
+    issuer: jwt.issuer,
+    authorization_endpoint: `${origin}/oauth2/authorize`,
+    jwks_uri: `${origin}/oauth2/jwks`,
+    response_types_supported: ['code'],
+    scopes_supported: [...AUTHKIT_OAUTH_SCOPES],
+    token_endpoint: `${origin}/oauth2/token`,
+  });
 
   app.get('/.well-known/oauth-authorization-server', (c) => {
     const origin = new URL(c.req.url).origin;
     return c.json({
-      authorization_endpoint: `${origin}/oauth2/authorize`,
+      ...discoveryBase(origin),
       code_challenge_methods_supported: [...AUTHKIT_CODE_CHALLENGE_METHODS],
       grant_types_supported: ['authorization_code', 'refresh_token'],
-      issuer: jwt.issuer,
-      jwks_uri: `${origin}/oauth2/jwks`,
       registration_endpoint: `${origin}/oauth2/register`,
-      scopes_supported: scopesSupported,
       response_modes_supported: ['query'],
-      response_types_supported: ['code'],
-      token_endpoint: `${origin}/oauth2/token`,
-      token_endpoint_auth_methods_supported: authMethods,
+      token_endpoint_auth_methods_supported: [...AUTHKIT_TOKEN_ENDPOINT_AUTH_METHODS],
     });
   });
 
@@ -83,15 +84,10 @@ export function authkitOauthRoutes(ctx: RouteContext): void {
   app.get('/.well-known/openid-configuration', (c) => {
     const origin = new URL(c.req.url).origin;
     return c.json({
-      issuer: jwt.issuer,
-      authorization_endpoint: `${origin}/oauth2/authorize`,
+      ...discoveryBase(origin),
       grant_types_supported: ['authorization_code', 'client_credentials', 'refresh_token'],
       id_token_signing_alg_values_supported: ['RS256'],
-      jwks_uri: `${origin}/oauth2/jwks`,
-      response_types_supported: ['code'],
-      scopes_supported: scopesSupported,
       subject_types_supported: ['public'],
-      token_endpoint: `${origin}/oauth2/token`,
       // Production lists the same three, in this order, here.
       token_endpoint_auth_methods_supported: ['none', 'client_secret_basic', 'client_secret_post'],
     });

@@ -261,6 +261,22 @@ describe('Standalone Connect', () => {
     expect(ws.externalAuthSessions.all()).toHaveLength(0);
   });
 
+  for (const { name, params } of [
+    { name: 'missing response_type', params: { redirect_uri: 'https://untrusted.example/callback' } },
+    {
+      name: 'unsupported response_type',
+      params: { response_type: 'token', redirect_uri: 'https://untrusted.example/callback' },
+    },
+    { name: 'missing redirect_uri', params: { response_type: 'code' } },
+  ]) {
+    it(`sends an unknown client to the local error page before checking ${name}`, async () => {
+      const query = new URLSearchParams({ client_id: 'unknown', ...params } as Record<string, string>);
+      const res = await server.app.request(`/oauth2/authorize?${query}`);
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe('http://localhost/oauth2/error?error=application_not_found');
+    });
+  }
+
   it('refuses a non-OAuth application, and hands one without login_url to the hosted sign-in', async () => {
     const application = ws.connectApplications.findOneBy('client_id', 'client_standalone')!;
     ws.connectApplications.update(application.id, { application_type: 'm2m' });

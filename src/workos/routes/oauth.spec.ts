@@ -416,6 +416,46 @@ describe('OAuth token endpoint client errors', () => {
     expect(((await known.json()) as any).error).toBe('unsupported_grant_type');
   });
 
+  for (const method of ['post', 'basic']) {
+    it(`rejects ${method} secret authentication for a public client even after an admin adds a matching secret`, async () => {
+      const registration = await app.request('/oauth2/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          redirect_uris: ['http://localhost:3000/cb'],
+          token_endpoint_auth_method: 'none',
+        }),
+      });
+      expect(registration.status).toBe(201);
+      const client = (await registration.json()) as any;
+      expect(client.client_secret).toBeUndefined();
+      const added = await app.request(`/connect/applications/${client.client_id}/client_secrets`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer sk_test_org' },
+      });
+      expect(added.status).toBe(201);
+      const { secret } = (await added.json()) as any;
+      const body: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code: 'unknown_code',
+        redirect_uri: 'http://localhost:3000/cb',
+      };
+      const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded' };
+      if (method === 'post') {
+        body.client_id = client.client_id;
+        body.client_secret = secret;
+      } else {
+        headers.Authorization = `Basic ${Buffer.from(`${client.client_id}:${secret}`).toString('base64')}`;
+      }
+      const res = await app.request('/oauth2/token', {
+        method: 'POST',
+        headers,
+        body: new URLSearchParams(body).toString(),
+      });
+      await expectInvalidClient(res, 'This client is registered for none.');
+    });
+  }
+
   it('carries the header on a wrong secret too, and not on successes', async () => {
     const wrong = await post({ grant_type: 'client_credentials', client_id: 'client_billing', client_secret: 'nope' });
     expect(wrong.status).toBe(401);
