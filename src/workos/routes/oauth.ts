@@ -245,6 +245,9 @@ export function oauthRoutes(ctx: RouteContext): void {
     const allowedScopes = availableScopes(application);
     const scopeParam = c.req.query('scope');
     const scopes = scopeParam?.trim() ? scopeParam.trim().split(/\s+/) : allowedScopes;
+    if (scopes.length === 0) {
+      return fail('invalid_scope', 'This application has no scopes available.');
+    }
     const unknownScopes = scopes.filter((s) => !allowedScopes.includes(s));
     if (unknownScopes.length > 0) {
       return fail(
