@@ -248,8 +248,10 @@ export function connectRoutes(ctx: RouteContext): void {
     }
     // Refresh tokens and parked hosted-sign-in requests of the dynamic-registration surface go the
     // same way: a deleted client must not keep minting tokens, or finish a sign-in it started.
+    // Only Connect-issued tokens: /user_management/authenticate stores whatever client_id its caller
+    // sent, so an AuthKit session that happens to share this id is not the application's to end.
     for (const token of ws.refreshTokens.all()) {
-      if (token.client_id === application.client_id) ws.refreshTokens.delete(token.id);
+      if (token.connect && token.client_id === application.client_id) ws.refreshTokens.delete(token.id);
     }
     store.deleteDataByPrefix(
       STORE_KEY_PREFIXES.connectAuthorize,

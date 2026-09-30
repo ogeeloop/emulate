@@ -1126,6 +1126,15 @@ describe('AuthKit OAuth server, registered grant types and revoked grants', () =
       return n;
     };
     expect(parked(client_id)).toBe(1);
+    // An AuthKit refresh token that /user_management/authenticate stored under the same client_id.
+    const authkit = ws.refreshTokens.insert({
+      token: 'ref_authkit_same_client',
+      user_id: ws.users.findOneBy('email', 'alice@acme.test')!.id,
+      organization_id: null,
+      session_id: 'session_authkit',
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      client_id,
+    });
 
     const app = ws.connectApplications.findOneBy('client_id', client_id)!;
     const del = await server.app.request(`/connect/applications/${app.id}`, { method: 'DELETE', headers: apiHeaders });
@@ -1134,8 +1143,9 @@ describe('AuthKit OAuth server, registered grant types and revoked grants', () =
     expect(ws.refreshTokens.findOneBy('token', tokens.refresh_token)).toBeUndefined();
     expect(parked(client_id)).toBe(0);
     expect((await json(await refresh(client_id, tokens.refresh_token))).error).toBe('invalid_client');
-    // Another client's are untouched.
+    // Another client's are untouched, and so is an AuthKit token that only shares the id.
     expect(ws.refreshTokens.findOneBy('token', otherTokens.refresh_token)).toBeDefined();
+    expect(ws.refreshTokens.get(authkit.id)).toBeDefined();
     expect(parked(other.client_id)).toBe(1);
   });
 
