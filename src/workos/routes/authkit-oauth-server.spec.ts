@@ -1108,19 +1108,28 @@ describe('AuthKit OAuth server, registered grant types and revoked grants', () =
     expect(authorize.status).toBe(302);
     const redirect = new URL(authorize.headers.get('location')!);
 
-    // Omitting scope must not restore the registration defaults either.
-    const fresh = await codeFor(client_id);
-    const atFreshExchange = await redeem(client_id, fresh.code, fresh.verifier);
+    // Omitting scope must fail before hosted sign-in rather than produce a code that cannot be exchanged.
+    const omittedScope = await server.app.request(
+      `/oauth2/authorize?${new URLSearchParams({
+        response_type: 'code',
+        client_id,
+        redirect_uri: callback,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+      })}`,
+    );
+    expect(omittedScope.status).toBe(302);
+    const omittedScopeRedirect = new URL(omittedScope.headers.get('location')!);
     expect({
       exchange: { status: atExchange.status, error: (await json(atExchange)).error },
       refresh: { status: atRefresh.status, error: (await json(atRefresh)).error },
       authorize: redirect.searchParams.get('error'),
-      freshExchange: { status: atFreshExchange.status, error: (await json(atFreshExchange)).error },
+      omittedScope: omittedScopeRedirect.searchParams.get('error'),
     }).toEqual({
       exchange: { status: 400, error: 'invalid_scope' },
       refresh: { status: 400, error: 'invalid_scope' },
       authorize: 'invalid_scope',
-      freshExchange: { status: 400, error: 'invalid_scope' },
+      omittedScope: 'invalid_scope',
     });
   });
 
