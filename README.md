@@ -645,10 +645,27 @@ curl -s $BASE/oauth2/token -d grant_type=authorization_code -d client_id=$CLIENT
 curl -s $BASE/oauth2/token -d grant_type=refresh_token -d client_id=$CLIENT_ID -d refresh_token=ref_…
 ```
 
+**`id_token`.** When the granted scope includes `openid`, the code exchange response also carries
+an RS256 `id_token`, signed with the key at `/oauth2/jwks`: `iss` (the bare issuer), `sub`, `aud`
+(the `client_id`), `exp`, `iat`, `auth_time`, and `nonce` when the authorize request sent one.
+`email` and `email_verified` appear only with the `email` scope, and `name`, `given_name` and
+`family_name` only with `profile` and only when the user has a value. The refresh grant does not
+return an `id_token` (OIDC makes that optional). Which claims accompany the required ones, and the
+scope-to-claim mapping, are emulator choices: production's ID token was not captured.
+
+**Grant lifetime.** Each refresh re-checks the grant: it is refused with `invalid_grant` when the
+session has expired or been revoked, or when the organization the token was scoped to is no longer
+one the user is an active member of (the code exchange makes the same membership check). A refresh
+token never outlives its session. The granted scopes are intersected with the application's current
+scopes at exchange and at refresh, so a scope removed with `PUT /connect/applications/:id` stops
+being issued; if nothing is left, the request is `invalid_scope`. Deleting an application also
+removes its refresh tokens and any sign-in request it had parked. These rules are emulator
+choices, not observed production behavior.
+
 **Assumptions and gaps.** Not implemented: Client ID Metadata Documents, the device grant on this
-surface, token introspection, `userinfo`, and `id_token` issuance (`openid` is accepted, but no ID
-token is returned even though the OIDC document lists `id_token_signing_alg_values_supported`).
-A refresh token is issued regardless of `offline_access`. The registered resource is matched
+surface, token introspection, and `userinfo`. A registration must include `authorization_code` in
+`grant_types` (RFC 7591 §2.1, because `response_types` is always `code`), and `response_types` is
+`["code"]` or omitted. A refresh token is issued regardless of `offline_access`. The registered resource is matched
 exactly, without wildcards, and the indicator flagged `default` is stored but is not used as a
 fallback audience. A seeded application with an empty `redirect_uris` accepts any allowed
 redirect host, as Standalone Connect does; a dynamically registered one is matched exactly.

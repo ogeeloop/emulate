@@ -994,12 +994,208 @@ describe('AuthKit OAuth server, registered grant types and revoked grants', () =
     expect((await json(refresh)).error).toBe('unauthorized_client');
   });
 
-  it('refuses authorization_code to a client registered only for refresh_token', async () => {
-    const { client_id } = await register({ grant_types: ['refresh_token'] });
-    const { code, verifier } = await codeFor(client_id);
-    const res = await redeem(client_id, code, verifier);
+  it('refuses to register a client for refresh_token alone', async () => {
+    const res = await server.app.request('/oauth2/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: [callback], grant_types: ['refresh_token'] }),
+    });
     expect(res.status).toBe(400);
-    expect((await json(res)).error).toBe('unauthorized_client');
+    expect((await json(res)).error).toBe('invalid_client_metadata');
+  });
+
+  const apiHeaders = { Authorization: 'Bearer sk_test_default', 'Content-Type': 'application/json' };
+  const both = ['authorization_code', 'refresh_token'];
+  const refresh = (client_id: string, refresh_token: string, extra: Record<string, string> = {}) =>
+    server.app.request('/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'refresh_token', client_id, refresh_token, ...extra }).toString(),
+    });
+  const setScopes = async (client_id: string, scopes: string[]) => {
+    const app = ws.connectApplications.findOneBy('client_id', client_id)!;
+    const res = await server.app.request(`/connect/applications/${app.id}`, {
+      method: 'PUT',
+      headers: apiHeaders,
+      body: JSON.stringify({ scopes }),
+    });
+    expect(res.status).toBe(200);
+  };
+
+  it('refuses a refresh for an organization the user has since left', async () => {
+    for (const leave of ['deactivate', 'delete'] as const) {
+      const { client_id } = await register({ grant_types: both });
+      const acme = ws.organizations.findOneBy('name', 'Acme')!;
+      const { code, verifier } = await codeFor(client_id, 'alice@acme.test', { organization_id: acme.id });
+      const tokens = await json(await redeem(client_id, code, verifier));
+      expect(server.jwt.verify(tokens.access_token).org_id).toBe(acme.id);
+
+      const membership = ws.organizationMemberships.findBy(
+        'user_id',
+        ws.users.findOneBy('email', 'alice@acme.test')!.id,
+      )[0];
+      if (leave === 'delete') ws.organizationMemberships.delete(membership.id);
+      else ws.organizationMemberships.update(membership.id, { status: 'inactive' });
+
+      const res = await refresh(client_id, tokens.refresh_token);
+      expect(res.status).toBe(400);
+      expect((await json(res)).error).toBe('invalid_grant');
+      if (leave === 'deactivate') ws.organizationMemberships.update(membership.id, { status: 'active' });
+    }
+  });
+
+  it('does not re-issue a scope removed from the application, at exchange or at refresh', async () => {
+    const { client_id } = await register({ grant_types: both, scope: 'openid profile email' });
+    const first = await codeFor(client_id, 'alice@acme.test', { scope: 'openid profile email' });
+    const tokens = await json(await redeem(client_id, first.code, first.verifier));
+    expect(tokens.scope).toBe('openid profile email');
+
+    await setScopes(client_id, ['openid', 'email']);
+    const refreshed = await json(await refresh(client_id, tokens.refresh_token));
+    expect(refreshed.scope).toBe('openid email');
+    expect(server.jwt.verify(refreshed.access_token).scope).toBe('openid email');
+
+    // At exchange: a code authorized before the removal.
+    await setScopes(client_id, ['openid', 'profile', 'email']);
+    const second = await codeFor(client_id, 'alice@acme.test', { scope: 'openid profile email' });
+    await setScopes(client_id, ['email']);
+    expect((await json(await redeem(client_id, second.code, second.verifier))).scope).toBe('email');
+  });
+
+  it('answers invalid_scope when no granted scope remains, at exchange and at refresh', async () => {
+    const { client_id } = await register({ grant_types: both, scope: 'openid profile' });
+    const first = await codeFor(client_id, 'alice@acme.test', { scope: 'openid' });
+    const tokens = await json(await redeem(client_id, first.code, first.verifier));
+    const pending = await codeFor(client_id, 'alice@acme.test', { scope: 'openid' });
+
+    await setScopes(client_id, ['profile']);
+    const atRefresh = await refresh(client_id, tokens.refresh_token);
+    expect(atRefresh.status).toBe(400);
+    expect((await json(atRefresh)).error).toBe('invalid_scope');
+    const atExchange = await redeem(client_id, pending.code, pending.verifier);
+    expect(atExchange.status).toBe(400);
+    expect((await json(atExchange)).error).toBe('invalid_scope');
+  });
+
+  it('refuses a refresh once the session has expired', async () => {
+    const { client_id } = await register({ grant_types: both });
+    const { code, verifier } = await codeFor(client_id);
+    const tokens = await json(await redeem(client_id, code, verifier));
+    const sid = server.jwt.verify(tokens.access_token).sid as string;
+    ws.sessions.update(sid, { expires_at: new Date(Date.now() - 1000).toISOString() });
+    const res = await refresh(client_id, tokens.refresh_token);
+    expect(res.status).toBe(400);
+    expect((await json(res)).error).toBe('invalid_grant');
+  });
+
+  it('never lets a refresh token outlive its session', async () => {
+    const { client_id } = await register({ grant_types: both });
+    const { code, verifier } = await codeFor(client_id);
+    const tokens = await json(await redeem(client_id, code, verifier));
+    const sid = server.jwt.verify(tokens.access_token).sid as string;
+    // The first token is issued with the session's own lifetime, so it is never longer.
+    const session = ws.sessions.get(sid)!;
+    expect(ws.refreshTokens.findOneBy('token', tokens.refresh_token)!.expires_at <= session.expires_at).toBe(true);
+
+    const soon = new Date(Date.now() + 3600_000).toISOString();
+    ws.sessions.update(sid, { expires_at: soon });
+    const next = await json(await refresh(client_id, tokens.refresh_token));
+    expect(ws.refreshTokens.findOneBy('token', next.refresh_token)!.expires_at).toBe(soon);
+  });
+
+  it('deleting the application removes its refresh tokens and parked authorize requests', async () => {
+    const { client_id } = await register({ grant_types: both });
+    const other = await register({ grant_types: both });
+    const { code, verifier } = await codeFor(client_id);
+    const tokens = await json(await redeem(client_id, code, verifier));
+    const otherCode = await codeFor(other.client_id);
+    const otherTokens = await json(await redeem(other.client_id, otherCode.code, otherCode.verifier));
+    // A request parked by authorize and never finished, for each client.
+    for (const id of [client_id, other.client_id]) {
+      const { challenge } = pkce();
+      await server.app.request(
+        `/oauth2/authorize?${new URLSearchParams({ response_type: 'code', client_id: id, redirect_uri: callback, code_challenge: challenge })}`,
+      );
+    }
+    const parked = (id: string) => {
+      let n = 0;
+      server.store.deleteDataByPrefix('connect_authorize:', (v: any) => {
+        if (v.client_id === id) n++;
+        return false;
+      });
+      return n;
+    };
+    expect(parked(client_id)).toBe(1);
+
+    const app = ws.connectApplications.findOneBy('client_id', client_id)!;
+    const del = await server.app.request(`/connect/applications/${app.id}`, { method: 'DELETE', headers: apiHeaders });
+    expect(del.status).toBe(204);
+
+    expect(ws.refreshTokens.findOneBy('token', tokens.refresh_token)).toBeUndefined();
+    expect(parked(client_id)).toBe(0);
+    expect((await json(await refresh(client_id, tokens.refresh_token))).error).toBe('invalid_client');
+    // Another client's are untouched.
+    expect(ws.refreshTokens.findOneBy('token', otherTokens.refresh_token)).toBeDefined();
+    expect(parked(other.client_id)).toBe(1);
+  });
+
+  describe('id_token', () => {
+    const claimsOf = (jwt: string) => JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString());
+
+    beforeEach(() => {
+      const alice = ws.users.findOneBy('email', 'alice@acme.test')!;
+      ws.users.update(alice.id, { name: 'Alice Smith', last_name: 'Smith', email_verified: true });
+    });
+
+    it('is issued at code exchange for the openid scope, signed under the JWKS key', async () => {
+      const { client_id } = await register({ grant_types: both });
+      const alice = ws.users.findOneBy('email', 'alice@acme.test')!;
+      const first = await codeFor(client_id, 'alice@acme.test', { scope: 'openid', nonce: 'n-0S6_WzA2Mj' });
+      const body = await json(await redeem(client_id, first.code, first.verifier));
+      const header = JSON.parse(Buffer.from(body.id_token.split('.')[0], 'base64url').toString());
+      expect(header.alg).toBe('RS256');
+      expect(header.kid).toBe(server.jwt.getJWKS().keys[0].kid);
+      // verify() checks the signature against the same key the JWKS publishes.
+      const claims = server.jwt.verify(body.id_token);
+      expect(claims).toMatchObject({ iss: baseUrl, sub: alice.id, aud: client_id, nonce: 'n-0S6_WzA2Mj' });
+      expect(typeof claims.exp).toBe('number');
+      expect(typeof claims.iat).toBe('number');
+      expect(typeof claims.auth_time).toBe('number');
+      // Only `openid` was granted: no email and no profile claims.
+      for (const absent of ['email', 'email_verified', 'name', 'given_name', 'family_name']) {
+        expect(claims).not.toHaveProperty(absent);
+      }
+    });
+
+    it('carries email claims only with the email scope and profile claims only with profile', async () => {
+      const { client_id } = await register({ grant_types: both });
+      const email = await codeFor(client_id, 'alice@acme.test', { scope: 'openid email' });
+      const withEmail = claimsOf((await json(await redeem(client_id, email.code, email.verifier))).id_token);
+      expect(withEmail).toMatchObject({ email: 'alice@acme.test', email_verified: true });
+      expect(withEmail).not.toHaveProperty('name');
+
+      const profile = await codeFor(client_id, 'alice@acme.test', { scope: 'openid profile' });
+      const withProfile = claimsOf((await json(await redeem(client_id, profile.code, profile.verifier))).id_token);
+      expect(withProfile).toMatchObject({ name: 'Alice Smith', given_name: 'Alice', family_name: 'Smith' });
+      expect(withProfile).not.toHaveProperty('email');
+      expect(withProfile).not.toHaveProperty('nonce');
+
+      // Profile values that do not exist are omitted, not sent empty.
+      const bob = await codeFor(client_id, 'bob@other.test', { scope: 'openid profile' });
+      const bobClaims = claimsOf((await json(await redeem(client_id, bob.code, bob.verifier))).id_token);
+      for (const absent of ['name', 'given_name', 'family_name']) expect(bobClaims).not.toHaveProperty(absent);
+    });
+
+    it('is not issued without openid, and not on refresh', async () => {
+      const { client_id } = await register({ grant_types: both });
+      const plain = await codeFor(client_id, 'alice@acme.test', { scope: 'profile email' });
+      expect(await json(await redeem(client_id, plain.code, plain.verifier))).not.toHaveProperty('id_token');
+
+      const oidc = await codeFor(client_id, 'alice@acme.test', { scope: 'openid' });
+      const tokens = await json(await redeem(client_id, oidc.code, oidc.verifier));
+      expect(tokens.id_token).toBeTruthy();
+      expect(await json(await refresh(client_id, tokens.refresh_token))).not.toHaveProperty('id_token');
+    });
   });
 
   it('refuses a code whose membership was revoked between authorize and token', async () => {

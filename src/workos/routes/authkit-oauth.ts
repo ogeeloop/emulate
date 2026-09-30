@@ -77,8 +77,9 @@ export function authkitOauthRoutes(ctx: RouteContext): void {
 
   // OIDC Discovery for the same domain. Production lists `client_credentials` here and not in the
   // OAuth metadata above, which is kept. `id_token_signing_alg_values_supported` and
-  // `subject_types_supported` are the fields OIDC Discovery 1.0 §3 requires; the emulator signs
-  // RS256 and has one subject per user, but does not issue an `id_token` from this surface yet.
+  // `subject_types_supported` are the fields OIDC Discovery 1.0 §3 requires, and strict OIDC
+  // clients need them. The emulator signs RS256 with one subject per user, and `/oauth2/token`
+  // issues an `id_token` at code exchange when `openid` is granted.
   app.get('/.well-known/openid-configuration', (c) => {
     const origin = new URL(c.req.url).origin;
     return c.json({
@@ -160,9 +161,20 @@ export function authkitOauthRoutes(ctx: RouteContext): void {
         `grant_types must be a subset of: ${REGISTRATION_GRANT_TYPES.join(', ')}.`,
       );
     }
+    // Only `code` is supported, so that is all a registration may name, and what is stored and
+    // returned is exactly what was registered. An empty list is refused rather than read as a default.
     const responseTypes = metadata.response_types ?? ['code'];
-    if (!Array.isArray(responseTypes) || !responseTypes.every((r) => r === 'code')) {
-      throw new OauthApiError(400, 'invalid_client_metadata', 'response_types must be ["code"].');
+    if (!Array.isArray(responseTypes) || responseTypes.length === 0 || !responseTypes.every((r) => r === 'code')) {
+      throw new OauthApiError(400, 'invalid_client_metadata', 'response_types must be a non-empty array of "code".');
+    }
+    // RFC 7591 §2.1: the `code` response type needs the `authorization_code` grant, so a refresh-only
+    // client describes something that cannot exist. `refresh_token` stays optional.
+    if (!grantTypes.includes('authorization_code')) {
+      throw new OauthApiError(
+        400,
+        'invalid_client_metadata',
+        'grant_types must include authorization_code when response_types includes code.',
+      );
     }
 
     let scopes: string[] = [...AUTHKIT_OAUTH_SCOPES];
@@ -215,6 +227,7 @@ export function authkitOauthRoutes(ctx: RouteContext): void {
       uses_pkce: isPublic,
       // Kept so /oauth2/token holds the client to what it registered for.
       grant_types: grantTypes as string[],
+      response_types: responseTypes as string[],
       token_endpoint_auth_method: method as (typeof AUTHKIT_TOKEN_ENDPOINT_AUTH_METHODS)[number],
       login_url: null,
       client_id: generateClientId(),
@@ -245,7 +258,7 @@ export function authkitOauthRoutes(ctx: RouteContext): void {
         client_name: application.name,
         token_endpoint_auth_method: method,
         grant_types: grantTypes,
-        response_types: ['code'],
+        response_types: responseTypes,
         scope: scopes.join(' '),
       },
       201,

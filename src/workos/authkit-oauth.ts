@@ -34,6 +34,15 @@ export function pkceMatches(codeVerifier: string, codeChallenge: string): boolea
   return computed.length === expected.length && timingSafeEqual(computed, expected);
 }
 
+/**
+ * The scopes an application can currently grant: what it is configured with, or the standard set
+ * for one configured with none (a dynamically registered client is given that set). Read at every
+ * authorize, exchange and refresh, so a scope removed from the application stops being issued.
+ */
+export function availableScopes(application: WorkOSConnectApplication): string[] {
+  return application.scopes.length > 0 ? application.scopes : [...AUTHKIT_OAUTH_SCOPES];
+}
+
 /** RFC 7636 §4.1: 43 to 128 unreserved characters. */
 export function isValidCodeVerifier(value: string): boolean {
   return /^[A-Za-z0-9\-._~]{43,128}$/.test(value);
@@ -76,5 +85,7 @@ export interface ConnectAuthorizeRequest {
   code_challenge_method: string | null;
   scope: string[];
   resource: string | null;
+  /** OIDC `nonce`, echoed into the `id_token`. */
+  nonce: string | null;
   expires_at: string;
 }

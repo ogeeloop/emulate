@@ -440,7 +440,9 @@ export function authRoutes(ctx: RouteContext): void {
       code_challenge_method: codeChallengeMethod ?? null,
       client_id: clientId,
       // What makes this code redeemable at /oauth2/token instead of here.
-      connect: connectRequest ? { scope: connectRequest.scope, resource: connectRequest.resource } : undefined,
+      connect: connectRequest
+        ? { scope: connectRequest.scope, resource: connectRequest.resource, nonce: connectRequest.nonce }
+        : undefined,
       auth_method: login?.auth_method ?? null,
       step_up_method: login?.step_up_method ?? null,
     });

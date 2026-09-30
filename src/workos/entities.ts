@@ -165,6 +165,8 @@ export interface ConnectGrant {
    * registered indicator is decided at each mint, so deleting one takes effect on the next refresh.
    */
   resource: string | null;
+  /** OIDC `nonce` from the authorize request; only a code carries one, since only the code exchange issues an `id_token`. */
+  nonce?: string | null;
 }
 
 export interface WorkOSAuthorizationCode extends Entity {
@@ -537,6 +539,7 @@ export interface WorkOSConnectApplication extends Entity {
    * seeded or dashboard-created application, which is not restricted on either.
    */
   grant_types?: string[];
+  response_types?: string[];
   token_endpoint_auth_method?: 'none' | 'client_secret_post' | 'client_secret_basic';
   /** Emulator-only Standalone Connect login page; never serialized on the API application. */
   login_url: string | null;

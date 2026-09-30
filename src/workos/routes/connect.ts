@@ -1,6 +1,8 @@
 import { type RouteContext, notFound, parseJsonBody, validationError, parseListParams } from '../../core/index.js';
 import type { WorkOSConnectApplication } from '../entities.js';
 import { getWorkOSStore } from '../store.js';
+import { STORE_KEY_PREFIXES } from '../constants.js';
+import type { ConnectAuthorizeRequest } from '../authkit-oauth.js';
 import {
   formatConnectApplication,
   formatClientSecret,
@@ -244,6 +246,15 @@ export function connectRoutes(ctx: RouteContext): void {
     for (const authCode of ws.authCodes.all()) {
       if (authCode.client_id === application.client_id) ws.authCodes.delete(authCode.id);
     }
+    // Refresh tokens and parked hosted-sign-in requests of the dynamic-registration surface go the
+    // same way: a deleted client must not keep minting tokens, or finish a sign-in it started.
+    for (const token of ws.refreshTokens.all()) {
+      if (token.client_id === application.client_id) ws.refreshTokens.delete(token.id);
+    }
+    store.deleteDataByPrefix(
+      STORE_KEY_PREFIXES.connectAuthorize,
+      (v) => (v as ConnectAuthorizeRequest).client_id === application.client_id,
+    );
     ws.connectApplications.delete(application.id);
     return c.body(null, 204);
   });

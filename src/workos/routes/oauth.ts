@@ -10,7 +10,7 @@ import {
   startLoginSession,
 } from '../helpers.js';
 import {
-  AUTHKIT_OAUTH_SCOPES,
+  availableScopes,
   isPublicClient,
   isValidCodeVerifier,
   isValidResourceUri,
@@ -239,7 +239,7 @@ export function oauthRoutes(ctx: RouteContext): void {
 
     // An application configured with scopes is limited to them; one with none (a seeded app that
     // never listed any) is offered the standard set an AuthKit domain advertises.
-    const allowedScopes = application.scopes.length > 0 ? application.scopes : [...AUTHKIT_OAUTH_SCOPES];
+    const allowedScopes = availableScopes(application);
     const scopeParam = c.req.query('scope');
     const scopes = scopeParam?.trim() ? scopeParam.trim().split(/\s+/) : allowedScopes;
     const unknownScopes = scopes.filter((s) => !allowedScopes.includes(s));
@@ -271,6 +271,7 @@ export function oauthRoutes(ctx: RouteContext): void {
       code_challenge_method: codeChallenge === undefined ? null : 'S256',
       scope: scopes,
       resource,
+      nonce: c.req.query('nonce') ?? null,
       expires_at: expiresIn(10),
     };
     store.setData(`${STORE_KEY_PREFIXES.connectAuthorize}${requestId}`, request);
@@ -329,6 +330,9 @@ export function oauthRoutes(ctx: RouteContext): void {
     return session;
   };
 
+  /** The earlier of two ISO timestamps. */
+  const cappedAt = (a: string, b: string) => (a < b ? a : b);
+
   /**
    * The token response for a user signed in through the hosted page: a Connect access token and a
    * refresh token. Known requirements of a Connect token: `iss` is the bare AuthKit domain, and it
@@ -368,12 +372,63 @@ export function oauthRoutes(ctx: RouteContext): void {
         user_id: session.user_id,
         organization_id: session.organization_id,
         session_id: session.id,
-        expires_at: expiresIn(30 * 24 * 60),
+        // Never outlives the session it belongs to, so rotation cannot extend a sign-in.
+        expires_at: cappedAt(expiresIn(30 * 24 * 60), session.expires_at),
         client_id: application.client_id,
         connect: { scope, resource },
       }).token;
     }
     return body;
+  };
+
+  /**
+   * The grant's stored scopes that the application can still issue. A scope removed from the
+   * application after the grant was made is dropped rather than re-issued; if nothing is left the
+   * request is `invalid_scope`, because a token with an empty scope would be a grant the user never
+   * made to a client that cannot use it.
+   */
+  const currentGrant = (application: WorkOSConnectApplication, stored: string[]): string[] => {
+    const available = availableScopes(application);
+    const remaining = stored.filter((s) => available.includes(s));
+    if (remaining.length === 0) {
+      throw new OauthApiError(400, 'invalid_scope', 'None of the granted scopes are available to this application.');
+    }
+    return remaining;
+  };
+
+  /**
+   * An OIDC `id_token` for the code exchange, RS256 under the key at `/oauth2/jwks`. `iss` is the
+   * bare issuer and `aud` the client_id, as OIDC Core §2 requires. Which claims ride along is an
+   * emulator choice, following the OIDC scope rules (Core §5.4): `email` and `email_verified` only
+   * with the `email` scope, and `name`/`given_name`/`family_name` only with `profile` and only where
+   * the user has a value. `nonce` is echoed when the authorize request carried one.
+   */
+  const issueIdToken = (
+    application: WorkOSConnectApplication,
+    user: WorkOSUser,
+    session: WorkOSSession,
+    scope: string[],
+    nonce: string | null,
+  ): string => {
+    const claims: Record<string, unknown> = {};
+    if (nonce !== null) claims.nonce = nonce;
+    if (scope.includes('email')) {
+      claims.email = user.email;
+      claims.email_verified = user.email_verified;
+    }
+    if (scope.includes('profile')) {
+      if (user.name) claims.name = user.name;
+      if (user.first_name) claims.given_name = user.first_name;
+      if (user.last_name) claims.family_name = user.last_name;
+    }
+    return jwt.sign(
+      {
+        sub: user.id,
+        aud: application.client_id,
+        auth_time: Math.floor(new Date(session.created_at).getTime() / 1000),
+      },
+      { expiresIn: TOKEN_TTL_SECONDS, claims },
+    );
   };
 
   /** RFC 6749 §3.3 narrowing: a request may ask for fewer scopes than were granted, never more. */
@@ -492,11 +547,19 @@ export function oauthRoutes(ctx: RouteContext): void {
       // Unlike authenticate, a revoked session ends its refresh tokens too: signing a person out
       // of an MCP client has to stop that client minting tokens for them.
       const session = ws.sessions.get(stored.session_id);
-      if (!ws.users.get(stored.user_id) || !session || session.status !== 'active') {
+      if (!ws.users.get(stored.user_id) || !session || session.status !== 'active' || isExpired(session.expires_at)) {
+        throw new OauthApiError(400, 'invalid_grant', 'Invalid refresh token.');
+      }
+      // The organization the token was scoped to must still be one the user belongs to. Minting
+      // with the stale `org_id` would hand a removed member access to a tenant they have left.
+      if (
+        stored.organization_id &&
+        !activeOrganizationsFor(ws, stored.user_id).some((o) => o.id === stored.organization_id)
+      ) {
         throw new OauthApiError(400, 'invalid_grant', 'Invalid refresh token.');
       }
       // Validated before the token is spent, so a bad `scope` or `resource` costs nothing.
-      const granted = narrowScope(stored.connect.scope, scope);
+      const granted = narrowScope(currentGrant(application, stored.connect.scope), scope);
       const bound = bindResource(stored.connect.resource, resource);
       ws.refreshTokens.delete(stored.id);
       // The narrowed scope and the bound resource carry forward; a narrowing is not undone by the next refresh.
@@ -541,7 +604,7 @@ export function oauthRoutes(ctx: RouteContext): void {
           throw new OauthApiError(400, 'invalid_grant', 'The authorization code has expired or is invalid.');
         }
 
-        const granted = narrowScope(authCode.connect.scope, scope);
+        const granted = narrowScope(currentGrant(application, authCode.connect.scope), scope);
         const bound = bindResource(authCode.connect.resource, resource);
         const user = ws.users.get(authCode.user_id)!;
 
@@ -558,6 +621,11 @@ export function oauthRoutes(ctx: RouteContext): void {
         ws.authCodes.delete(authCode.id);
         const session = startSession(c, user, organizationId, authCode);
         response = issueUserTokens(application, session, granted, bound);
+        // OIDC Core §3.1.3.3: the code exchange returns the ID token. Refresh does not, which OIDC
+        // allows (§12.2 makes it optional) and which keeps refresh a plain access-token rotation.
+        if (granted.includes('openid')) {
+          response.id_token = issueIdToken(application, user, session, granted, authCode.connect.nonce ?? null);
+        }
       } else {
         // Minimal Standalone Connect exchange: no refresh token, id_token, or PKCE.
         const granted = narrowScope(Array.isArray(application.scopes) ? application.scopes : [], scope);

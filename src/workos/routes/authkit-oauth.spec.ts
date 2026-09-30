@@ -266,6 +266,34 @@ describe('Dynamic client registration', () => {
     }
   });
 
+  it('rejects a registration whose grant_types cannot produce the code response type it names', async () => {
+    // RFC 7591 §2.1: `code` needs `authorization_code`. Refresh-only is such a client.
+    for (const grant_types of [['refresh_token']]) {
+      for (const response_types of [undefined, ['code']]) {
+        const res = await register({ redirect_uris: [callback], grant_types, response_types });
+        expect(res.status).toBe(400);
+        expect((await json(res)).error).toBe('invalid_client_metadata');
+      }
+    }
+    // refresh_token stays optional.
+    const ok = await register({ redirect_uris: [callback], grant_types: ['authorization_code'] });
+    expect(ok.status).toBe(201);
+  });
+
+  it('rejects an empty or unsupported response_types, and returns and stores exactly what was registered', async () => {
+    for (const response_types of [[], ['token'], ['code', 'token'], 'code', 7]) {
+      const res = await register({ redirect_uris: [callback], response_types });
+      expect(res.status).toBe(400);
+      expect((await json(res)).error).toBe('invalid_client_metadata');
+    }
+    const body = await json(await register({ redirect_uris: [callback], response_types: ['code'] }));
+    expect(body.response_types).toEqual(['code']);
+    expect(ws.connectApplications.findOneBy('client_id', body.client_id)!.response_types).toEqual(['code']);
+    // Omitted means the RFC default, `code`, and that is what comes back.
+    const defaulted = await json(await register({ redirect_uris: [callback] }));
+    expect(defaulted.response_types).toEqual(['code']);
+  });
+
   it('rejects metadata the emulator cannot honor as invalid_client_metadata', async () => {
     for (const extra of [
       { token_endpoint_auth_method: 'private_key_jwt' },
