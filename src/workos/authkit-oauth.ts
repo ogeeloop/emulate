@@ -35,12 +35,15 @@ export function pkceMatches(codeVerifier: string, codeChallenge: string): boolea
 }
 
 /**
- * The scopes an application can currently grant: what it is configured with, or the standard set
- * for one configured with none (a dynamically registered client is given that set). Read at every
- * authorize, exchange and refresh, so a scope removed from the application stops being issued.
+ * The scopes an application can currently grant. Seeded and dashboard applications configured
+ * with none retain the historical standard default. Dynamic registration stores its defaults
+ * explicitly, so clearing those scopes must leave none. Read at every authorize, exchange and
+ * refresh, so a scope removed from the application stops being issued.
  */
 export function availableScopes(application: WorkOSConnectApplication): string[] {
-  return application.scopes.length > 0 ? application.scopes : [...AUTHKIT_OAUTH_SCOPES];
+  return application.was_dynamically_registered || application.scopes.length > 0
+    ? application.scopes
+    : [...AUTHKIT_OAUTH_SCOPES];
 }
 
 /** RFC 7636 §4.1: 43 to 128 unreserved characters. */
@@ -74,18 +77,4 @@ export function resolveAudience(
 ): string {
   if (resource && ws.authkitOauthResources.findOneBy('uri', resource)) return resource;
   return application.audience ?? application.client_id;
-}
-
-/** A `/oauth2/authorize` request that passed validation, held while the hosted sign-in runs. */
-export interface ConnectAuthorizeRequest {
-  client_id: string;
-  redirect_uri: string;
-  state: string | null;
-  code_challenge: string | null;
-  code_challenge_method: string | null;
-  scope: string[];
-  resource: string | null;
-  /** OIDC `nonce`, echoed into the `id_token`. */
-  nonce: string | null;
-  expires_at: string;
 }

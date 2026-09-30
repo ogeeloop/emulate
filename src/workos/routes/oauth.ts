@@ -16,9 +16,9 @@ import {
   isValidResourceUri,
   pkceMatches,
   resolveAudience,
-  type ConnectAuthorizeRequest,
 } from '../authkit-oauth.js';
-import { STORE_KEYS, STORE_KEY_PREFIXES } from '../constants.js';
+import { createConnectAuthorizeRequest } from '../connect-authorize-request.js';
+import { STORE_KEYS } from '../constants.js';
 import { renderOAuthErrorPage } from '../login-page.js';
 import type { EventBus } from '../event-bus.js';
 import type { WorkOSConnectApplication, WorkOSSession, WorkOSUser } from '../entities.js';
@@ -179,17 +179,20 @@ export function oauthRoutes(ctx: RouteContext): void {
   // server-side completion of the first and none of the second.
   app.get('/oauth2/authorize', (c) => {
     const { client_id: clientId, redirect_uri: redirectUri, response_type: responseType, state } = c.req.query();
-    if (!clientId || !redirectUri) {
+    if (!clientId) {
       throw new OauthApiError(400, 'invalid_request', 'client_id and redirect_uri are required.');
-    }
-    if (responseType !== 'code') {
-      throw new OauthApiError(400, 'unsupported_response_type', 'response_type must be code.');
     }
     const application = ws.connectApplications.findOneBy('client_id', clientId);
     // An unknown client is a redirect to the error page, not an API error (observed against a
     // production AuthKit domain, 2026-09-30): the caller is a browser with no callback to trust yet.
     if (!application) {
       return c.redirect(`${new URL(c.req.url).origin}/oauth2/error?error=application_not_found`, 302);
+    }
+    if (!redirectUri) {
+      throw new OauthApiError(400, 'invalid_request', 'client_id and redirect_uri are required.');
+    }
+    if (responseType !== 'code') {
+      throw new OauthApiError(400, 'unsupported_response_type', 'response_type must be code.');
     }
     if (application.application_type !== 'oauth') {
       throw new OauthApiError(400, 'unauthorized_client', 'The client must be an OAuth application.');
@@ -257,13 +260,7 @@ export function oauthRoutes(ctx: RouteContext): void {
       return fail('invalid_target', 'resource must be an absolute URI without a fragment.');
     }
 
-    // Sweep requests no sign-in ever finished, as the interactive login tokens are swept, so the
-    // store holds the last ten minutes rather than one per abandoned browser tab.
-    store.deleteDataByPrefix(STORE_KEY_PREFIXES.connectAuthorize, (v) =>
-      isExpired((v as ConnectAuthorizeRequest).expires_at),
-    );
-    const requestId = generateId('connect_req');
-    const request: ConnectAuthorizeRequest = {
+    const requestId = createConnectAuthorizeRequest(store, {
       client_id: clientId,
       redirect_uri: redirectUri,
       state: state ?? null,
@@ -272,9 +269,7 @@ export function oauthRoutes(ctx: RouteContext): void {
       scope: scopes,
       resource,
       nonce: c.req.query('nonce') ?? null,
-      expires_at: expiresIn(10),
-    };
-    store.setData(`${STORE_KEY_PREFIXES.connectAuthorize}${requestId}`, request);
+    });
 
     const signIn = new URL(`${new URL(c.req.url).origin}/user_management/authorize`);
     signIn.searchParams.set('connect_request', requestId);
@@ -497,12 +492,14 @@ export function oauthRoutes(ctx: RouteContext): void {
       ? ws.clientSecrets.findBy('application_id', application.id).find((s) => s.value === clientSecret)
       : undefined;
     if (clientSecret && !matchedSecret) throw invalidClient('Invalid client ID or secret.');
-    // A dynamically registered client authenticates the way it registered to: Basic or in the
-    // body, not either. Seeded applications registered for nothing, so they accept both.
+    // A dynamically registered client authenticates the way it registered to: none, Basic or in
+    // the body. An admin-added secret does not turn a public registration into a confidential one.
+    // Seeded applications registered for nothing, so they accept both secret methods.
     const registeredMethod = application.token_endpoint_auth_method;
     if (
       matchedSecret &&
-      ((registeredMethod === 'client_secret_basic' && secretVia !== 'basic') ||
+      (registeredMethod === 'none' ||
+        (registeredMethod === 'client_secret_basic' && secretVia !== 'basic') ||
         (registeredMethod === 'client_secret_post' && secretVia !== 'post'))
     ) {
       throw invalidClient(`This client is registered for ${registeredMethod}.`);

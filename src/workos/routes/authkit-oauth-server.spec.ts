@@ -1077,6 +1077,53 @@ describe('AuthKit OAuth server, registered grant types and revoked grants', () =
     expect((await json(atExchange)).error).toBe('invalid_scope');
   });
 
+  it('clearing a dynamic client’s scopes revokes pending and refresh grants without restoring standard scopes', async () => {
+    const { client_id } = await register({ grant_types: both });
+    const first = await codeFor(client_id);
+    const tokens = await json(await redeem(client_id, first.code, first.verifier));
+    expect(tokens.scope).toBe('email offline_access openid profile');
+    const pending = await codeFor(client_id);
+
+    const cleared = await server.app.request(`/connect/applications/${client_id}`, {
+      method: 'PUT',
+      headers: apiHeaders,
+      body: JSON.stringify({ scopes: [] }),
+    });
+    expect(cleared.status).toBe(200);
+    expect((await json(cleared)).scopes).toEqual([]);
+
+    const atExchange = await redeem(client_id, pending.code, pending.verifier);
+    const atRefresh = await refresh(client_id, tokens.refresh_token);
+    const { challenge } = pkce();
+    const authorize = await server.app.request(
+      `/oauth2/authorize?${new URLSearchParams({
+        response_type: 'code',
+        client_id,
+        redirect_uri: callback,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        scope: 'email offline_access openid profile',
+      })}`,
+    );
+    expect(authorize.status).toBe(302);
+    const redirect = new URL(authorize.headers.get('location')!);
+
+    // Omitting scope must not restore the registration defaults either.
+    const fresh = await codeFor(client_id);
+    const atFreshExchange = await redeem(client_id, fresh.code, fresh.verifier);
+    expect({
+      exchange: { status: atExchange.status, error: (await json(atExchange)).error },
+      refresh: { status: atRefresh.status, error: (await json(atRefresh)).error },
+      authorize: redirect.searchParams.get('error'),
+      freshExchange: { status: atFreshExchange.status, error: (await json(atFreshExchange)).error },
+    }).toEqual({
+      exchange: { status: 400, error: 'invalid_scope' },
+      refresh: { status: 400, error: 'invalid_scope' },
+      authorize: 'invalid_scope',
+      freshExchange: { status: 400, error: 'invalid_scope' },
+    });
+  });
+
   it('refuses a refresh once the session has expired', async () => {
     const { client_id } = await register({ grant_types: both });
     const { code, verifier } = await codeFor(client_id);

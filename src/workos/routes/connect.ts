@@ -1,8 +1,7 @@
 import { type RouteContext, notFound, parseJsonBody, validationError, parseListParams } from '../../core/index.js';
 import type { WorkOSConnectApplication } from '../entities.js';
 import { getWorkOSStore } from '../store.js';
-import { STORE_KEY_PREFIXES } from '../constants.js';
-import type { ConnectAuthorizeRequest } from '../authkit-oauth.js';
+import { deleteConnectAuthorizeRequestsForClient } from '../connect-authorize-request.js';
 import {
   formatConnectApplication,
   formatClientSecret,
@@ -253,10 +252,7 @@ export function connectRoutes(ctx: RouteContext): void {
     for (const token of ws.refreshTokens.all()) {
       if (token.connect && token.client_id === application.client_id) ws.refreshTokens.delete(token.id);
     }
-    store.deleteDataByPrefix(
-      STORE_KEY_PREFIXES.connectAuthorize,
-      (v) => (v as ConnectAuthorizeRequest).client_id === application.client_id,
-    );
+    deleteConnectAuthorizeRequestsForClient(store, application.client_id);
     ws.connectApplications.delete(application.id);
     return c.body(null, 204);
   });

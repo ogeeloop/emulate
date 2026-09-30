@@ -27,14 +27,18 @@ import {
   findUserByEmail,
   requireEmailString,
   emailsMatch,
-  activeOrganizationsFor as activeOrganizationsForUser,
+  activeOrganizationsFor,
   startLoginSession,
 } from '../helpers.js';
 import { renderConfiguredJwtTemplate } from '../jwt-template.js';
 import type { EventBus } from '../event-bus.js';
 import type { WorkOSInvitation, WorkOSSSOAuthorization, WorkOSUser } from '../entities.js';
 import { STORE_KEYS, STORE_KEY_PREFIXES } from '../constants.js';
-import type { ConnectAuthorizeRequest } from '../authkit-oauth.js';
+import {
+  consumeConnectAuthorizeRequest,
+  getConnectAuthorizeRequest,
+  type ConnectAuthorizeRequest,
+} from '../connect-authorize-request.js';
 import {
   renderLoginPage,
   renderDeviceVerifyPage,
@@ -111,8 +115,6 @@ export function authRoutes(ctx: RouteContext): void {
   const { app, store, jwt } = ctx;
   const ws = getWorkOSStore(store);
 
-  const activeOrganizationsFor = (userId: string) => activeOrganizationsForUser(ws, userId);
-
   /**
    * The authorize parameters a page carries through its form, so the POST that follows finishes
    * the request the GET started. `email` and `organization_id` are added by the pages that know
@@ -135,10 +137,8 @@ export function authRoutes(ctx: RouteContext): void {
    * page that follows.
    */
   function loadConnectRequest(token: string): ConnectAuthorizeRequest {
-    const key = `${STORE_KEY_PREFIXES.connectAuthorize}${token}`;
-    const request = store.getData<ConnectAuthorizeRequest>(key);
-    if (request && !isExpired(request.expires_at)) return request;
-    if (request) store.deleteData(key);
+    const request = getConnectAuthorizeRequest(store, token);
+    if (request) return request;
     throw new OauthApiError(400, 'invalid_request', 'The authorization request has expired or is invalid.');
   }
 
@@ -185,7 +185,7 @@ export function authRoutes(ctx: RouteContext): void {
     // a code for one they are not a member of would put that org_id on the token with no role or
     // permissions behind it, which is a session no membership justifies and, for anything
     // authorizing on org_id, the wrong tenant entirely.
-    if (organizationId && !activeOrganizationsFor(user.id).some((o) => o.id === organizationId)) {
+    if (organizationId && !activeOrganizationsFor(ws, user.id).some((o) => o.id === organizationId)) {
       throw new WorkOSApiError(
         400,
         `User is not an active member of organization ${organizationId}`,
@@ -411,7 +411,7 @@ export function authRoutes(ctx: RouteContext): void {
     // Interactive only: a headless caller drives the documented API and handles that response
     // itself, and this is the one mode that can put a page in front of a human.
     if (!organizationId && interactive) {
-      const selectable = activeOrganizationsFor(user.id);
+      const selectable = activeOrganizationsFor(ws, user.id);
       if (selectable.length > 1) {
         const hiddenFields: Record<string, string> = { ...carriedFields(params), email: user.email };
         // The verified login rides along under its token, so an organization POST that leaves
@@ -429,7 +429,10 @@ export function authRoutes(ctx: RouteContext): void {
       }
     }
 
-    const connectRequest = params.connectRequest ? loadConnectRequest(params.connectRequest) : null;
+    const connectRequest = params.connectRequest ? consumeConnectAuthorizeRequest(store, params.connectRequest) : null;
+    if (params.connectRequest && !connectRequest) {
+      throw new OauthApiError(400, 'invalid_request', 'The authorization request has expired or is invalid.');
+    }
     const authCode = ws.authCodes.insert({
       user_id: user.id,
       organization_id: organizationId,
@@ -446,7 +449,6 @@ export function authRoutes(ctx: RouteContext): void {
       auth_method: login?.auth_method ?? null,
       step_up_method: login?.step_up_method ?? null,
     });
-    if (params.connectRequest) store.deleteData(`${STORE_KEY_PREFIXES.connectAuthorize}${params.connectRequest}`);
     // One code per verified login: the token is spent once it has minted something. Deleted
     // rather than overwritten, so a long-lived emulator does not keep one entry per login.
     if (loginToken) store.deleteData(`${STORE_KEY_PREFIXES.interactiveLogin}${loginToken}`);
@@ -926,7 +928,7 @@ export function authRoutes(ctx: RouteContext): void {
         // unauthenticated at this point and the distinction is not theirs to learn.
         if (
           authCode.organization_id &&
-          !activeOrganizationsFor(authCode.user_id).some((o) => o.id === authCode.organization_id)
+          !activeOrganizationsFor(ws, authCode.user_id).some((o) => o.id === authCode.organization_id)
         ) {
           failAuth(
             'OAuth',
@@ -1311,7 +1313,7 @@ export function authRoutes(ctx: RouteContext): void {
     // refresh is excluded: it reuses a session whose scope is already settled, and an explicit
     // body.organization_id stays the only way to move an existing session between orgs.
     if (isFreshLogin && !organizationId) {
-      const selectableOrgs = activeOrganizationsFor(user.id);
+      const selectableOrgs = activeOrganizationsFor(ws, user.id);
 
       if (selectableOrgs.length === 1) {
         organizationId = selectableOrgs[0].id;
