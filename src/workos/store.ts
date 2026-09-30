@@ -24,6 +24,7 @@ import type {
   WorkOSDeviceAuthorization,
   WorkOSInvitation,
   WorkOSRedirectUri,
+  WorkOSAuthkitOauthResource,
   WorkOSCorsOrigin,
   WorkOSAuthorizedApplication,
   WorkOSConnectedAccount,
@@ -77,6 +78,7 @@ export interface WorkOSStore {
   deviceAuthorizations: Collection<WorkOSDeviceAuthorization>;
   invitations: Collection<WorkOSInvitation>;
   redirectUris: Collection<WorkOSRedirectUri>;
+  authkitOauthResources: Collection<WorkOSAuthkitOauthResource>;
   corsOrigins: Collection<WorkOSCorsOrigin>;
   authorizedApplications: Collection<WorkOSAuthorizedApplication>;
   connectedAccounts: Collection<WorkOSConnectedAccount>;
@@ -192,6 +194,11 @@ export function getWorkOSStore(store: Store): WorkOSStore {
       'organization_id',
     ]),
     redirectUris: store.collection<WorkOSRedirectUri>('workos.redirect_uris', ID_PREFIXES.redirect_uri, ['uri']),
+    authkitOauthResources: store.collection<WorkOSAuthkitOauthResource>(
+      'workos.authkit_oauth_resources',
+      ID_PREFIXES.authkit_oauth_resource,
+      ['uri'],
+    ),
     corsOrigins: store.collection<WorkOSCorsOrigin>('workos.cors_origins', ID_PREFIXES.cors_origin, ['origin']),
     authorizedApplications: store.collection<WorkOSAuthorizedApplication>(
       'workos.authorized_applications',

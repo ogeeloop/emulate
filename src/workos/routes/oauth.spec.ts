@@ -350,3 +350,84 @@ describe('OAuth M2M token routes', () => {
     expect((await json(scoped)).error).toBe('invalid_scope');
   });
 });
+
+/**
+ * Client failures at the token endpoint. Observed against a production AuthKit domain, 2026-09-30:
+ * no client is `401 invalid_client` "Missing authorization header."; an unknown client_id is
+ * `401 invalid_client` "Application not found." under every grant type, an unsupported one
+ * included (so the client lookup runs before grant-type validation); both carry
+ * `WWW-Authenticate: Basic realm="AuthKit"`. This deliberately replaces the endpoint's earlier
+ * 400s for a missing client and its 401 with a different description for an unknown one.
+ */
+describe('OAuth token endpoint client errors', () => {
+  let app: ReturnType<typeof createTestApp>['app'];
+
+  beforeEach(() => {
+    const server = createTestApp();
+    app = server.app;
+    seedM2M(server.store);
+  });
+
+  const post = (body: Record<string, string>) =>
+    app.request('/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(body).toString(),
+    });
+  const expectInvalidClient = async (res: Response, description: string) => {
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBe('Basic realm="AuthKit"');
+    expect(await res.json()).toEqual({ error: 'invalid_client', error_description: description });
+  };
+
+  it('answers no client at all with Missing authorization header', async () => {
+    await expectInvalidClient(await post({ grant_type: 'client_credentials' }), 'Missing authorization header.');
+    await expectInvalidClient(await post({}), 'Missing authorization header.');
+  });
+
+  it('answers a known client that presents no secret the same way', async () => {
+    await expectInvalidClient(
+      await post({ grant_type: 'client_credentials', client_id: 'client_billing' }),
+      'Missing authorization header.',
+    );
+  });
+
+  it('answers an unknown client_id with Application not found under every grant type', async () => {
+    const bodies: Record<string, string>[] = [
+      { grant_type: 'client_credentials' },
+      { grant_type: 'client_credentials', client_secret: 'secret_billing_value' },
+      { grant_type: 'authorization_code', code: 'x', redirect_uri: 'http://localhost:3000/cb' },
+      { grant_type: 'refresh_token', refresh_token: 'ref_x' },
+      { grant_type: 'not_a_grant' },
+      {},
+    ];
+    for (const body of bodies) {
+      await expectInvalidClient(await post({ client_id: 'client_nope', ...body }), 'Application not found.');
+    }
+  });
+
+  it('checks the client before the grant type', async () => {
+    const known = await post({
+      grant_type: 'not_a_grant',
+      client_id: 'client_billing',
+      client_secret: 'secret_billing_value',
+    });
+    expect(known.status).toBe(400);
+    expect(((await known.json()) as any).error).toBe('unsupported_grant_type');
+  });
+
+  it('carries the header on a wrong secret too, and not on successes', async () => {
+    const wrong = await post({ grant_type: 'client_credentials', client_id: 'client_billing', client_secret: 'nope' });
+    expect(wrong.status).toBe(401);
+    expect(wrong.headers.get('www-authenticate')).toBe('Basic realm="AuthKit"');
+    const ok = await post({
+      grant_type: 'client_credentials',
+      client_id: 'client_billing',
+      client_secret: 'secret_billing_value',
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('www-authenticate')).toBeNull();
+    expect(ok.headers.get('cache-control')).toBe('no-store');
+    expect(ok.headers.get('pragma')).toBe('no-cache');
+  });
+});

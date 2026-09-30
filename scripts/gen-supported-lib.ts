@@ -207,7 +207,7 @@ export const FEATURES: FeatureDef[] = [
     ],
     seedKeys: ['connectApplications'],
     notes:
-      "A redirect URI is stored as a bare string, so `default` is accepted on create and update but always reported as `false`. `uses_pkce` and `is_first_party` are stored and reported, but nothing is registered dynamically, so `was_dynamically_registered` is always `false` and the list route's `registration_types` filter only ever matches `authenticated`. `POST /client/token` mints a signed, short-lived token, but the spec documents only the `{ token }` envelope — the claims inside are an emulator convention, and no Client GraphQL API is served for it to authenticate against.",
+      'A redirect URI is stored as a bare string, so `default` is accepted on create and update but always reported as `false`. `uses_pkce` and `is_first_party` are stored and reported; `uses_pkce` makes a public client, which must use PKCE at `/oauth2/authorize`. `POST /oauth2/register` (RFC 7591, outside the spec) creates `was_dynamically_registered` applications, which `registration_types` filters. `POST /client/token` mints a signed, short-lived token, but the spec documents only the `{ token }` envelope — the claims inside are an emulator convention, and no Client GraphQL API is served for it to authenticate against.',
   },
   {
     name: 'JWT Templates',
@@ -232,8 +232,9 @@ export const FEATURES: FeatureDef[] = [
   {
     name: 'AuthKit Configuration',
     tags: ['user-management.redirect-uris', 'user-management.cors-origins', 'user-management.authkit-oauth-resources'],
+    seedKeys: ['resourceIndicators'],
     notes:
-      'Redirect URIs are accepted but not enforced against authorize requests. OAuth resource indicators are not implemented.',
+      'Redirect URIs are accepted but not enforced against authorize requests. MCP resource indicators (RFC 8707) are stored and, when a request names a registered one, become the `aud` of tokens from `/oauth2/token`; wildcard patterns are refused, and the resource flagged `default` is not used as a fallback audience.',
   },
   {
     name: 'Admin Portal',

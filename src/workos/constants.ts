@@ -15,6 +15,8 @@ export const STORE_KEY_PREFIXES = {
   pendingAuth: 'pending_auth:',
   /** A password the interactive page has checked, carried across the organization page instead of the password itself. */
   interactiveLogin: 'interactive_login:',
+  /** A validated `/oauth2/authorize` request, waiting on the hosted sign-in it redirected to. */
+  connectAuthorize: 'connect_authorize:',
   ssoToken: 'sso_token:',
   ssoLogout: 'sso_logout:',
   auditSchema: 'audit_schema_',

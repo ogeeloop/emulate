@@ -30,6 +30,7 @@ import type {
   WorkOSGroup,
   WorkOSUser,
   WorkOSSession,
+  WorkOSAuthkitOauthResource,
   WorkOSEmailVerification,
   WorkOSPasswordReset,
   WorkOSMagicAuth,
@@ -644,6 +645,75 @@ export function acceptInvitation(
 }
 
 export function formatRedirectUri(r: WorkOSRedirectUri): Record<string, unknown> {
+  return formatEntity(r);
+}
+
+/**
+ * The organizations a session could be scoped to. 'pending' is an unaccepted invitation and
+ * 'inactive' a deactivated member; neither is one production would scope a session to.
+ */
+export function activeOrganizationsFor(ws: WorkOSStore, userId: string): Array<{ id: string; name: string }> {
+  const orgs: Array<{ id: string; name: string }> = [];
+  for (const m of ws.organizationMemberships.findBy('user_id', userId)) {
+    if (m.status !== 'active') continue;
+    const org = ws.organizations.get(m.organization_id);
+    if (org) orgs.push({ id: org.id, name: org.name });
+  }
+  return orgs;
+}
+
+/**
+ * Record a fresh sign-in: stamp the user's last sign-in and create the session it starts. Shared by
+ * `/user_management/authenticate` and `/oauth2/token`, so a login through either leaves the same
+ * trace. The caller emits the authentication event, which it knows the method of.
+ *
+ * `verifyEmail` marks the mailbox proven (a redeemed magic-auth code does), folded into the sign-in
+ * write so it is one write and one `user.updated`.
+ */
+export function startLoginSession(
+  ws: WorkOSStore,
+  input: {
+    user: WorkOSUser;
+    organizationId: string | null;
+    ipAddress: string | null;
+    userAgent: string | null;
+    /** The method the session records; see AUTH_METHOD_SESSION_VALUES. */
+    authMethod: string;
+    verifyEmail?: boolean;
+  },
+): WorkOSSession {
+  const { user } = input;
+  if (input.verifyEmail) {
+    // A redeemed magic-auth code proves mailbox ownership; production marks the email
+    // verified via the standard update path, which emits user.updated. Folded into the
+    // sign-in write so it is one write, one event, and nothing persists before the
+    // template gate above — which keeps a failed render from implying a login that
+    // never completed.
+    ws.users.update(user.id, {
+      last_sign_in_at: new Date().toISOString(),
+      email_verified: true,
+    });
+  } else {
+    // No real attribute change: production stamps last_sign_in_at via a dedicated,
+    // silent updateWithSignIn path (a raw, debounced DB write) that bypasses the
+    // event-emitting update(), so a login fires session.created without a spurious
+    // user.updated. See https://github.com/workos/emulate/issues/55.
+    ws.users.updateSilent(user.id, { last_sign_in_at: new Date().toISOString() });
+  }
+  return ws.sessions.insert({
+    object: 'session',
+    user_id: user.id,
+    organization_id: input.organizationId,
+    ip_address: input.ipAddress,
+    user_agent: input.userAgent,
+    auth_method: AUTH_METHOD_SESSION_VALUES[input.authMethod] ?? 'unknown',
+    status: 'active',
+    expires_at: expiresIn(30 * 24 * 60), // matches refresh token lifetime
+    ended_at: null,
+  });
+}
+
+export function formatAuthkitOauthResource(r: WorkOSAuthkitOauthResource): Record<string, unknown> {
   return formatEntity(r);
 }
 

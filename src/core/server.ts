@@ -25,7 +25,8 @@ export interface ServerOptions {
    * constant accepts emulator tokens unchanged.
    *
    * Not the whole claim: an AuthKit access token carries `{issuer}/user_management/{client_id}`,
-   * as production does. Only the M2M, SSO and widget tokens carry the bare value.
+   * as production does. Only the M2M, SSO, widget and OAuth-server (`/oauth2/token`) tokens carry
+   * the bare value.
    */
   issuer?: string;
   /** Pinned RSA signing key, keeping the JWKS stable across restarts. */
@@ -78,6 +79,10 @@ export function createServer(plugin: ServicePlugin, options: ServerOptions = {})
     '/user_management/authorize/device/verify',
     '/user_management/authenticate',
     '/user_management/sessions/logout',
+    // The AuthKit domain's discovery documents, fetched by an OAuth client before it holds any
+    // credential. Only these two: the RFC 8414 path-inserted form is not served (see the routes).
+    '/.well-known/oauth-authorization-server',
+    '/.well-known/openid-configuration',
   ]);
 
   // /oauth2/* is the M2M authorization server: the token endpoint authenticates by

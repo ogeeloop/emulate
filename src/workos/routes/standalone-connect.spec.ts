@@ -242,7 +242,6 @@ describe('Standalone Connect', () => {
   it('rejects invalid authorize parameters before minting a session', async () => {
     for (const params of [
       { client_id: '' },
-      { client_id: 'unknown' },
       { redirect_uri: '' },
       { response_type: 'token' },
       { redirect_uri: 'http://localhost:3000/unregistered' },
@@ -252,12 +251,26 @@ describe('Standalone Connect', () => {
     expect(ws.externalAuthSessions.all()).toHaveLength(0);
   });
 
-  it('requires an OAuth application configured with login_url', async () => {
+  it('sends an unknown client_id to the OAuth error page rather than answering an API error', async () => {
+    // Observed against a production AuthKit domain, 2026-09-30. Formerly asserted as a 400 here.
+    const res = await authorize({ client_id: 'unknown' });
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get('location')!);
+    expect(location.pathname).toBe('/oauth2/error');
+    expect(location.searchParams.get('error')).toBe('application_not_found');
+    expect(ws.externalAuthSessions.all()).toHaveLength(0);
+  });
+
+  it('refuses a non-OAuth application, and hands one without login_url to the hosted sign-in', async () => {
     const application = ws.connectApplications.findOneBy('client_id', 'client_standalone')!;
     ws.connectApplications.update(application.id, { application_type: 'm2m' });
     expect((await authorize()).status).toBe(400);
+    // Without a login_url this is no longer an error: the application is signed in on AuthKit's
+    // hosted page (see authkit-oauth-server.spec.ts) rather than through a Standalone Connect session.
     ws.connectApplications.update(application.id, { application_type: 'oauth', login_url: null });
-    expect((await authorize()).status).toBe(400);
+    const hosted = await authorize();
+    expect(hosted.status).toBe(302);
+    expect(new URL(hosted.headers.get('location')!).pathname).toBe('/user_management/authorize');
     expect(ws.externalAuthSessions.all()).toHaveLength(0);
   });
 

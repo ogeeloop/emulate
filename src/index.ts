@@ -38,6 +38,7 @@ export interface EmulatorSeedConfig {
   permissions?: WorkOSSeedConfig['permissions'];
   webhookEndpoints?: WorkOSSeedConfig['webhookEndpoints'];
   connectApplications?: WorkOSSeedConfig['connectApplications'];
+  resourceIndicators?: WorkOSSeedConfig['resourceIndicators'];
   jwtTemplate?: WorkOSSeedConfig['jwtTemplate'];
   featureFlags?: WorkOSSeedConfig['featureFlags'];
   directories?: WorkOSSeedConfig['directories'];
@@ -62,7 +63,8 @@ export interface EmulatorOptions {
    * test-only branch. The verifier must still fetch JWKS from the emulator.
    *
    * Not the whole claim: an AuthKit access token carries `{issuer}/user_management/{client_id}`,
-   * as production does. Only the M2M, SSO and widget tokens carry the bare value.
+   * as production does. Only the M2M, SSO, widget and OAuth-server (`/oauth2/token`) tokens carry
+   * the bare value, and the latter's discovery documents advertise it as `issuer`.
    */
   issuer?: string;
   /**

@@ -420,7 +420,7 @@ connectApplications:
     type: oauth
     is_first_party: false # optional, oauth only; a third-party app needs `organization`
     organization: Acme Corp
-    uses_pkce: true # optional, oauth only; reported on the app, not enforced
+    uses_pkce: true # optional, oauth only; marks a public client: the hosted sign-in requires PKCE of it
 ```
 
 Each seeded application is provisioned with a client secret. Pin `client_secret` to bake a known
@@ -438,8 +438,8 @@ through the full Connect Applications surface:
 | `POST`   | `/connect/applications/:id/client_secrets` | The one response carrying the plaintext, as `secret`  |
 | `DELETE` | `/connect/client_secrets/:id`              |                                                       |
 
-`registration_types` defaults to `authenticated`, as production does — nothing in the emulator
-performs dynamic client registration, so an unfiltered list shows every application it can create.
+`registration_types` defaults to `authenticated`, as production does, so an unfiltered list hides the
+applications `POST /oauth2/register` created; ask for them with `?registration_types=dynamic`.
 A secret's `last_used_at` is stamped when a token exchange actually succeeds, not merely when the
 secret is presented.
 
@@ -551,6 +551,107 @@ is not tracked: tokens default to the application's configured scopes, optionall
 at token exchange. The emulator's completion URL uses `/oauth2/authorize/complete?external_auth_id=...`,
 not production's AuthKit-domain `/oauth/authorize/complete?state=...`; always follow the returned URL
 rather than constructing it. This is a local testing flow, not a replacement authentication service.
+
+### AuthKit OAuth server (MCP clients)
+
+An MCP client (Claude Code and the like) signs in to a WorkOS environment through its **AuthKit
+domain**, which acts as an OAuth 2.1 authorization server. The emulator reproduces that flow on its
+single origin, so an MCP resource server can be tested against it locally:
+
+1. **Discovery.** `GET /.well-known/oauth-authorization-server` and
+   `GET /.well-known/openid-configuration`, unauthenticated, with the field sets a production
+   AuthKit domain serves. Endpoint URLs follow the host the document was fetched over; `issuer` is
+   the configured bare issuer (`--issuer`, default the emulator's own URL). There is no RFC 8414
+   path-inserted form, because the issuer has no path. Only what the emulator implements is
+   advertised: production's `device_authorization_endpoint`, `introspection_endpoint`,
+   `userinfo_endpoint` and `client_id_metadata_document_supported` are **omitted, not stubbed**, so
+   a client never follows discovery into a 404.
+2. **Registration.** `POST /oauth2/register` (RFC 7591), unauthenticated. It creates a real Connect
+   `oauth` application: third-party, `was_dynamically_registered`, listed under
+   `registration_types=dynamic`. `token_endpoint_auth_method: none` makes a public client (PKCE
+   only, no secret); anything else, `client_secret_basic` by default, a confidential one with a
+   generated `client_secret`. The `grant_types` (default `["authorization_code"]`, as RFC 7591 says)
+   and `token_endpoint_auth_method` a client registers are stored and enforced at `/oauth2/token`:
+   no `refresh_token` grant type means no refresh token is issued and the grant is refused, and a
+   `client_secret_basic` client cannot send its secret in the body (nor the reverse). `logo_uri`,
+   `client_uri`, `policy_uri` and `tos_uri` must be http(s) URLs. `redirect_uris` go through the [redirect-host policy](#redirect-uri-hosts);
+   `scope` is limited to `openid profile email offline_access` (no custom scopes).
+3. **Authorize.** `GET /oauth2/authorize` on an application with no `login_url` validates the
+   request, then redirects to the hosted AuthKit sign-in, the page `/user_management/authorize`
+   serves. With `--interactive` that is the login page; without it the sign-in completes at once,
+   with the first user or the one named by `login_hint`, as non-interactive `/user_management/authorize`
+   does. **There is no consent step**: the first user (or `login_hint`) is signed in and authorized
+   without a prompt. Accepted: `code_challenge` with `code_challenge_method=S256` (the only method; **required of
+   a public client**), `state`, `scope`, RFC 8707 `resource`, plus `login_hint` and
+   `organization_id`. Problems found after the callback is trusted come back on it as
+   `error`/`error_description`/`state`. An unknown `client_id` redirects to
+   `/oauth2/error?error=application_not_found` (observed against a production AuthKit domain,
+   2026-09-30); that page is `200 text/html` and reflects the `error_description` it is given,
+   escaped. Applications with a
+   `login_url` keep the [Standalone Connect](#standalone-connect) behavior.
+4. **Token.** `POST /oauth2/token` with `authorization_code`: a public client authenticates by its
+   `code_verifier` with no secret, a confidential one by its secret (post or Basic) and, if the
+   code carries a challenge, the verifier too. The response is `access_token`, `token_type`,
+   `expires_in`, `refresh_token` and `scope`. `grant_type=refresh_token` rotates the token within
+   the same session (the old one is spent) and can narrow, never widen, the scope. A request with no
+   client at all is `401 invalid_client` / `Missing authorization header.`; an unknown `client_id`
+   is `401 invalid_client` / `Application not found.` under every grant type, checked before the
+   grant type is validated; both carry `WWW-Authenticate: Basic realm="AuthKit"` (observed against
+   a production AuthKit domain, 2026-09-30). Token responses carry `Cache-Control: no-store` and
+   `Pragma: no-cache`. The `code_verifier` must be 43 to 128 unreserved characters (RFC 7636
+   §4.1), and a wrong one spends the code.
+   `client_credentials` keeps its behavior and claims, with one deliberate change to its client
+   errors: a request naming no client, or a `client_id` that does not exist, is now the `401` above
+   rather than the earlier `400 invalid_request` / `401 Invalid client ID or secret.`, and a known
+   client that presents no secret is `401 Missing authorization header.` (the last is an
+   assumption; only the unknown-client cases were observed).
+5. **Claims.** Required of a Connect token: `iss` is the bare issuer, signed by the key at
+   `/oauth2/jwks`, and it carries `aud`, `sub` (the user id), `client_id` and `exp`. Beyond that the
+   set is an emulator choice, since production's full claim set was not captured: `sid`, `jti`, a
+   space-delimited `scope`, `org_id` when the user has an organization context, and no `email`.
+6. **Resource indicators.** Declare the resource servers your environment registers, by seed or
+   through the API (`POST/GET /user_management/authkit_oauth_resources`, `DELETE …/:id`). When the
+   `resource` on authorize or token matches one, `aud` is that resource; otherwise `aud` falls back
+   to the application's `audience`, then its `client_id`. The resource is bound to the code and
+   carried across every refresh; the token request may restate it or omit it, and anything else
+   (including a resource on a grant authorized for none) is `invalid_target`.
+
+```yaml
+resourceIndicators:
+  - uri: https://mcp.example.test/mcp
+users:
+  - email: alice@acme.test
+```
+
+```bash
+BASE=http://localhost:4100
+curl -s $BASE/.well-known/oauth-authorization-server
+
+# Register a public client
+CLIENT_ID=$(curl -s $BASE/oauth2/register -H 'Content-Type: application/json' \
+  -d '{"client_name":"demo","redirect_uris":["http://localhost:33418/callback"],"token_endpoint_auth_method":"none"}' \
+  | jq -r .client_id)
+
+# PKCE pair
+VERIFIER=$(openssl rand -base64 48 | tr -d '=+/' | cut -c1-64)
+CHALLENGE=$(printf %s "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+# Authorize: two redirects (hosted sign-in, then your callback carrying ?code=…)
+curl -si "$BASE/oauth2/authorize?response_type=code&client_id=$CLIENT_ID&redirect_uri=http%3A%2F%2Flocalhost%3A33418%2Fcallback&code_challenge=$CHALLENGE&code_challenge_method=S256&state=s1&resource=https%3A%2F%2Fmcp.example.test%2Fmcp&login_hint=alice%40acme.test" | grep -i '^location'
+# curl -si "<that location>" | grep -i '^location'   ->  http://localhost:33418/callback?code=auth_code_…&state=s1
+
+curl -s $BASE/oauth2/token -d grant_type=authorization_code -d client_id=$CLIENT_ID \
+  -d code=auth_code_… -d redirect_uri=http://localhost:33418/callback -d code_verifier=$VERIFIER
+curl -s $BASE/oauth2/token -d grant_type=refresh_token -d client_id=$CLIENT_ID -d refresh_token=ref_…
+```
+
+**Assumptions and gaps.** Not implemented: Client ID Metadata Documents, the device grant on this
+surface, token introspection, `userinfo`, and `id_token` issuance (`openid` is accepted, but no ID
+token is returned even though the OIDC document lists `id_token_signing_alg_values_supported`).
+A refresh token is issued regardless of `offline_access`. The registered resource is matched
+exactly, without wildcards, and the indicator flagged `default` is stored but is not used as a
+fallback audience. A seeded application with an empty `redirect_uris` accepts any allowed
+redirect host, as Standalone Connect does; a dynamically registered one is matched exactly.
 
 ### Client API tokens
 
@@ -1243,8 +1344,8 @@ What this buys you:
 `--issuer` is the base the client id hangs off, not the whole claim. An AuthKit access token from
 `/user_management/authenticate` carries `iss` of `{issuer}/user_management/{client_id}`, which is
 what production mints — so `--issuer https://api.workos.com` with a client of `client_123` gives
-`https://api.workos.com/user_management/client_123`. The M2M, SSO and widget tokens carry the bare
-value, as does an AuthKit token from a grant that named no `client_id` — there is no client to hang
+`https://api.workos.com/user_management/client_123`. The M2M, SSO, widget and OAuth-server
+(`/oauth2/token`) tokens carry the bare value, as does an AuthKit token from a grant that named no `client_id` — there is no client to hang
 off, and inventing a placeholder would advertise an issuer whose discovery document is not there.
 
 The key must be a PEM-encoded RSA private key, since tokens are signed RS256; anything else fails at

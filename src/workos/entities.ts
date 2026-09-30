@@ -151,6 +151,22 @@ export interface WorkOSExternalAuthSession extends Entity {
   user_id: string | null;
 }
 
+/**
+ * What a grant minted on the AuthKit-domain OAuth surface (`/oauth2/authorize` → `/oauth2/token`)
+ * carries beyond an ordinary AuthKit one. Its presence is also the marker that says which token
+ * endpoint may redeem the code or refresh token: `/oauth2/token` takes only these, and
+ * `/user_management/authenticate` refuses them, so a grant can't cross between two issuers.
+ */
+export interface ConnectGrant {
+  /** Scopes granted at authorize time; a refresh may narrow them, never widen. */
+  scope: string[];
+  /**
+   * The RFC 8707 `resource` as the client asked for it, registered or not. Whether it is a
+   * registered indicator is decided at each mint, so deleting one takes effect on the next refresh.
+   */
+  resource: string | null;
+}
+
 export interface WorkOSAuthorizationCode extends Entity {
   user_id: string;
   organization_id: string | null;
@@ -161,6 +177,8 @@ export interface WorkOSAuthorizationCode extends Entity {
   code_challenge_method: string | null;
   /** The OAuth client that initiated the authorization, bound to the code so the token claim can't be spoofed at redemption. */
   client_id: string | null;
+  /** Set on codes minted by `/oauth2/authorize`'s hosted sign-in; redeemable only at `/oauth2/token`. */
+  connect?: ConnectGrant | null;
   /**
    * How the user proved who they were on the way to this code, when the emulator knows. The
    * interactive password page records 'Password'; the default auto-redirect checks nothing and
@@ -262,6 +280,18 @@ export interface WorkOSRedirectUri extends Entity {
   uri: string;
 }
 
+/**
+ * An MCP resource indicator (RFC 8707) registered for the environment. The `resource` an
+ * `/oauth2/authorize` or `/oauth2/token` request names becomes the token's `aud` only when it
+ * matches one of these; see `authkit_oauth_resources` in the spec.
+ */
+export interface WorkOSAuthkitOauthResource extends Entity {
+  object: 'authkit_oauth_resource';
+  uri: string;
+  /** The environment default. At most one resource holds it; setting it clears the previous holder. */
+  default: boolean;
+}
+
 export interface WorkOSCorsOrigin extends Entity {
   object: 'cors_origin';
   origin: string;
@@ -321,6 +351,8 @@ export interface WorkOSRefreshToken extends Entity {
   expires_at: string;
   /** The client_id the original access token was minted for, carried forward across refresh rotations. */
   client_id: string | null;
+  /** Set when the token was issued by `/oauth2/token`; only that endpoint may rotate it. */
+  connect?: ConnectGrant | null;
 }
 
 export interface WorkOSAuthenticationChallenge extends Entity {
@@ -500,6 +532,12 @@ export interface WorkOSConnectApplication extends Entity {
   /** oauth third-party only: registered through dynamic client registration rather than the dashboard. */
   was_dynamically_registered: boolean;
   uses_pkce: boolean;
+  /**
+   * oauth, dynamic registration only (RFC 7591): what the client registered for. Undefined on a
+   * seeded or dashboard-created application, which is not restricted on either.
+   */
+  grant_types?: string[];
+  token_endpoint_auth_method?: 'none' | 'client_secret_post' | 'client_secret_basic';
   /** Emulator-only Standalone Connect login page; never serialized on the API application. */
   login_url: string | null;
   client_id: string;

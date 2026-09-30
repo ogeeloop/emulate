@@ -35,6 +35,7 @@ import { radarRoutes } from './routes/radar.js';
 import { connectRoutes } from './routes/connect.js';
 import { clientApiRoutes } from './routes/client-api.js';
 import { oauthRoutes } from './routes/oauth.js';
+import { authkitOauthRoutes } from './routes/authkit-oauth.js';
 import { standaloneConnectRoutes } from './routes/standalone-connect.js';
 import { directoryRoutes } from './routes/directories.js';
 import { auditLogRoutes } from './routes/audit-logs.js';
@@ -328,8 +329,19 @@ export interface WorkOSSeedConnectApplication {
   is_first_party?: boolean;
   /** `oauth` only. Reported on the application; the emulator does not enforce PKCE from it. */
   uses_pkce?: boolean;
-  /** Emulator-only Standalone Connect login page, receiving an external_auth_id. */
+  /**
+   * Emulator-only Standalone Connect login page, receiving an external_auth_id. Leave it out and
+   * `/oauth2/authorize` signs users in on the AuthKit hosted page instead, as an MCP client's
+   * dynamically registered application does.
+   */
   login_url?: string | null;
+}
+
+export interface WorkOSSeedAuthkitOauthResource {
+  /** The resource indicator (RFC 8707), an absolute URI with no fragment or wildcard. Unique. */
+  uri: string;
+  /** Make it the environment default. At most one entry may set it. Defaults to `false`. */
+  default?: boolean;
 }
 
 export interface WorkOSSeedApiKey {
@@ -444,6 +456,12 @@ export interface WorkOSSeedConfig {
   permissions?: WorkOSSeedPermission[];
   webhookEndpoints?: WorkOSSeedWebhookEndpoint[];
   connectApplications?: WorkOSSeedConnectApplication[];
+  /**
+   * MCP resource indicators (RFC 8707). A `resource` an OAuth client sends to `/oauth2/authorize`
+   * or `/oauth2/token` becomes the access token's `aud` when it matches one of these; otherwise
+   * `aud` is the application's `audience`, then its `client_id`.
+   */
+  resourceIndicators?: WorkOSSeedAuthkitOauthResource[];
   /**
    * API keys. Either the legacy auth allow-list map (value → environment) or an array
    * of API key resources. The array form creates `api_key` records AND registers each
@@ -920,6 +938,16 @@ export function seedFromConfig(store: Store, _baseUrl: string, config: WorkOSSee
     }
   }
 
+  if (config.resourceIndicators) {
+    for (const resourceConfig of config.resourceIndicators) {
+      ws.authkitOauthResources.insert({
+        object: 'authkit_oauth_resource',
+        uri: resourceConfig.uri,
+        default: resourceConfig.default === true,
+      });
+    }
+  }
+
   // The array form seeds API key resources; the map form is the legacy auth allow-list
   // handled at server creation (see createEmulator), so it is skipped here.
   if (Array.isArray(config.apiKeys)) {
@@ -1101,6 +1129,7 @@ export const workosPlugin: ServicePlugin = {
     connectRoutes(ctx);
     clientApiRoutes(ctx);
     oauthRoutes(ctx);
+    authkitOauthRoutes(ctx);
     standaloneConnectRoutes(ctx);
     directoryRoutes(ctx);
     auditLogRoutes(ctx);

@@ -75,6 +75,25 @@ export function renderDeviceVerifyPage(options: DeviceVerifyPageOptions): string
 </html>`;
 }
 
+/**
+ * The page `/oauth2/error` serves. `application_not_found` gets a fixed explanation unless a
+ * description is supplied; any other error shows its code and description. Both values arrive on
+ * the query string, so they are attacker-controlled text: the card renderer escapes them.
+ */
+export function renderOAuthErrorPage(options: { error: string; description?: string }): string {
+  const { error, description } = options;
+  if (error === 'application_not_found') {
+    return renderDeviceVerifyPage({
+      title: 'Application not found',
+      message: description || 'The application that sent you here is not registered with this environment.',
+    });
+  }
+  return renderDeviceVerifyPage({
+    title: 'Authorization error',
+    message: description ? `${error}: ${description}` : error,
+  });
+}
+
 export function renderLoginPage(options: LoginPageOptions): string {
   const { title, subtitle, emailHint, formAction, hiddenFields, users } = options;
 

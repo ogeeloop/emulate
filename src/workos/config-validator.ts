@@ -6,6 +6,7 @@ import { validateJwtTemplateContent } from './jwt-template.js';
 import { isValidResourceTypeSlug } from './constants.js';
 import { AGENT_SESSION_SETTING_LIMITS } from './agent-sessions.js';
 import { normalizeEmail, type NormalizedEmail } from './helpers.js';
+import { isValidResourceUri } from './authkit-oauth.js';
 
 /**
  * A seed is the one creation path that does not go through a route, so it is held to what the
@@ -1003,6 +1004,58 @@ export function validateSeedConfig(config: WorkOSSeedConfig): ConfigValidationRe
           });
         }
         seenClientIds.add(appConfig.client_id);
+      });
+    }
+  }
+
+  // Validate MCP resource indicators. The routes refuse the same shapes, so a seed cannot hold one
+  // the API would not have created, and the uniqueness the create route enforces holds here too.
+  if (config.resourceIndicators) {
+    if (!Array.isArray(config.resourceIndicators)) {
+      errors.push({
+        path: 'resourceIndicators',
+        message: 'resourceIndicators must be an array',
+        value: config.resourceIndicators,
+      });
+    } else {
+      const seenUris = new Set<string>();
+      let defaults = 0;
+      config.resourceIndicators.forEach((entry, index) => {
+        const at = (field: string) => `resourceIndicators[${index}].${field}`;
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          errors.push({
+            path: `resourceIndicators[${index}]`,
+            message: 'each resource must be an object',
+            value: entry,
+          });
+          return;
+        }
+        if (typeof entry.uri !== 'string' || !entry.uri) {
+          errors.push({ path: at('uri'), message: 'uri is required and must be a string', value: entry.uri });
+        } else if (entry.uri.includes('*') || !isValidResourceUri(entry.uri)) {
+          errors.push({
+            path: at('uri'),
+            message: 'uri must be an absolute URI without a fragment or wildcard',
+            value: entry.uri,
+          });
+        } else if (seenUris.has(entry.uri)) {
+          errors.push({
+            path: at('uri'),
+            message: 'uri must be unique across resourceIndicators',
+            value: entry.uri,
+          });
+        } else {
+          seenUris.add(entry.uri);
+        }
+        if (entry.default !== undefined && typeof entry.default !== 'boolean') {
+          errors.push({ path: at('default'), message: 'default must be a boolean if provided', value: entry.default });
+        } else if (entry.default === true && ++defaults > 1) {
+          errors.push({
+            path: at('default'),
+            message: 'only one resource may be the default',
+            value: entry.default,
+          });
+        }
       });
     }
   }

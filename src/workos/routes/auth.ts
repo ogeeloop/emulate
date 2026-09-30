@@ -18,7 +18,6 @@ import {
   isExpired,
   expiresIn,
   assertAllowedRedirectUri,
-  AUTH_METHOD_SESSION_VALUES,
   resolveResponseAuthMethod,
   resolveSessionResponseAuthMethod,
   emitAuthenticationEvent,
@@ -28,11 +27,14 @@ import {
   findUserByEmail,
   requireEmailString,
   emailsMatch,
+  activeOrganizationsFor as activeOrganizationsForUser,
+  startLoginSession,
 } from '../helpers.js';
 import { renderConfiguredJwtTemplate } from '../jwt-template.js';
 import type { EventBus } from '../event-bus.js';
 import type { WorkOSInvitation, WorkOSSSOAuthorization, WorkOSUser } from '../entities.js';
 import { STORE_KEYS, STORE_KEY_PREFIXES } from '../constants.js';
+import type { ConnectAuthorizeRequest } from '../authkit-oauth.js';
 import {
   renderLoginPage,
   renderDeviceVerifyPage,
@@ -97,25 +99,19 @@ interface AuthorizeParams {
   code: string | null;
   /** Proof from an earlier password page that this login is already verified, carried across every page after it. */
   pendingToken: string | null;
+  /**
+   * The `/oauth2/authorize` request this sign-in is finishing, by token. Set only by the
+   * AuthKit-domain OAuth surface, which sends the browser here rather than rendering a sign-in
+   * page of its own; the token carries the validated request through every page that follows.
+   */
+  connectRequest: string | null;
 }
 
 export function authRoutes(ctx: RouteContext): void {
   const { app, store, jwt } = ctx;
   const ws = getWorkOSStore(store);
 
-  /**
-   * The organizations a session could be scoped to. 'pending' is an unaccepted invitation and
-   * 'inactive' a deactivated member; neither is one production would scope a session to.
-   */
-  function activeOrganizationsFor(userId: string): Array<{ id: string; name: string }> {
-    const orgs: Array<{ id: string; name: string }> = [];
-    for (const m of ws.organizationMemberships.findBy('user_id', userId)) {
-      if (m.status !== 'active') continue;
-      const org = ws.organizations.get(m.organization_id);
-      if (org) orgs.push({ id: org.id, name: org.name });
-    }
-    return orgs;
-  }
+  const activeOrganizationsFor = (userId: string) => activeOrganizationsForUser(ws, userId);
 
   /**
    * The authorize parameters a page carries through its form, so the POST that follows finishes
@@ -128,7 +124,22 @@ export function authRoutes(ctx: RouteContext): void {
     if (params.codeChallenge) fields.code_challenge = params.codeChallenge;
     if (params.codeChallengeMethod) fields.code_challenge_method = params.codeChallengeMethod;
     if (params.clientId) fields.client_id = params.clientId;
+    if (params.connectRequest) fields.connect_request = params.connectRequest;
     return fields;
+  }
+
+  /**
+   * The validated `/oauth2/authorize` request behind a `connect_request` token. It is the source of
+   * truth for everything it holds: a POST cannot substitute a different redirect_uri, client or
+   * challenge for the ones that request was validated with, so the checks made there hold on every
+   * page that follows.
+   */
+  function loadConnectRequest(token: string): ConnectAuthorizeRequest {
+    const key = `${STORE_KEY_PREFIXES.connectAuthorize}${token}`;
+    const request = store.getData<ConnectAuthorizeRequest>(key);
+    if (request && !isExpired(request.expires_at)) return request;
+    if (request) store.deleteData(key);
+    throw new OauthApiError(400, 'invalid_request', 'The authorization request has expired or is invalid.');
   }
 
   function resolveAndRedirect(c: any, params: AuthorizeParams) {
@@ -418,6 +429,7 @@ export function authRoutes(ctx: RouteContext): void {
       }
     }
 
+    const connectRequest = params.connectRequest ? loadConnectRequest(params.connectRequest) : null;
     const authCode = ws.authCodes.insert({
       user_id: user.id,
       organization_id: organizationId,
@@ -427,9 +439,12 @@ export function authRoutes(ctx: RouteContext): void {
       code_challenge: codeChallenge ?? null,
       code_challenge_method: codeChallengeMethod ?? null,
       client_id: clientId,
+      // What makes this code redeemable at /oauth2/token instead of here.
+      connect: connectRequest ? { scope: connectRequest.scope, resource: connectRequest.resource } : undefined,
       auth_method: login?.auth_method ?? null,
       step_up_method: login?.step_up_method ?? null,
     });
+    if (params.connectRequest) store.deleteData(`${STORE_KEY_PREFIXES.connectAuthorize}${params.connectRequest}`);
     // One code per verified login: the token is spent once it has minted something. Deleted
     // rather than overwritten, so a long-lived emulator does not keep one entry per login.
     if (loginToken) store.deleteData(`${STORE_KEY_PREFIXES.interactiveLogin}${loginToken}`);
@@ -442,12 +457,16 @@ export function authRoutes(ctx: RouteContext): void {
 
   app.get('/user_management/authorize', (c) => {
     const url = new URL(c.req.url);
-    const redirectUri = url.searchParams.get('redirect_uri');
-    const state = url.searchParams.get('state');
-    const codeChallenge = url.searchParams.get('code_challenge');
-    const codeChallengeMethod = url.searchParams.get('code_challenge_method');
+    // A request that /oauth2/authorize has already validated supplies its own parameters, and
+    // the query cannot override them.
+    const connectToken = url.searchParams.get('connect_request');
+    const connect = connectToken ? loadConnectRequest(connectToken) : null;
+    const redirectUri = connect ? connect.redirect_uri : url.searchParams.get('redirect_uri');
+    const state = connect ? connect.state : url.searchParams.get('state');
+    const codeChallenge = connect ? connect.code_challenge : url.searchParams.get('code_challenge');
+    const codeChallengeMethod = connect ? connect.code_challenge_method : url.searchParams.get('code_challenge_method');
     const loginHint = url.searchParams.get('login_hint');
-    const clientId = url.searchParams.get('client_id');
+    const clientId = connect ? connect.client_id : url.searchParams.get('client_id');
     const organizationId = url.searchParams.get('organization_id');
 
     if (!redirectUri) {
@@ -469,6 +488,7 @@ export function authRoutes(ctx: RouteContext): void {
       // Carried through the login page so a caller that already knows the organization skips
       // the selection page after the POST, rather than losing the GET's pre-selection here.
       if (organizationId) hiddenFields.organization_id = organizationId;
+      if (connectToken) hiddenFields.connect_request = connectToken;
 
       return c.html(
         renderLoginPage({
@@ -496,28 +516,32 @@ export function authRoutes(ctx: RouteContext): void {
       password: null,
       code: null,
       pendingToken: null,
+      connectRequest: connectToken,
     });
   });
 
   app.post('/user_management/authorize', async (c) => {
     const form = await c.req.parseBody();
-    const redirectUri = form.redirect_uri as string;
+    const connectToken = typeof form.connect_request === 'string' && form.connect_request ? form.connect_request : null;
+    const connect = connectToken ? loadConnectRequest(connectToken) : null;
+    const redirectUri = connect ? connect.redirect_uri : (form.redirect_uri as string);
     if (!redirectUri) {
       throw new WorkOSApiError(400, 'redirect_uri is required', 'invalid_request');
     }
 
     return resolveAndRedirect(c, {
       redirectUri,
-      state: (form.state as string) ?? null,
-      codeChallenge: (form.code_challenge as string) ?? null,
-      codeChallengeMethod: (form.code_challenge_method as string) ?? null,
+      state: connect ? connect.state : ((form.state as string) ?? null),
+      codeChallenge: connect ? connect.code_challenge : ((form.code_challenge as string) ?? null),
+      codeChallengeMethod: connect ? connect.code_challenge_method : ((form.code_challenge_method as string) ?? null),
       loginHint: (form.email as string) ?? null,
-      clientId: (form.client_id as string) ?? null,
+      clientId: connect ? connect.client_id : ((form.client_id as string) ?? null),
       organizationId: (form.organization_id as string) ?? null,
       // A string, even an empty one, is an attempt; absent means the form has not asked yet.
       password: typeof form.password === 'string' ? form.password : null,
       code: typeof form.code === 'string' ? form.code : null,
       pendingToken: (form.pending_authentication_token as string) ?? null,
+      connectRequest: connectToken,
     });
   });
 
@@ -835,9 +859,10 @@ export function authRoutes(ctx: RouteContext): void {
             new OauthApiError(400, 'invalid_grant', `The code '${code}' has expired or is invalid.`),
           );
         }
-        // Standalone Connect codes belong to /oauth2/token, which enforces the Connect
-        // client's secret and redirect_uri. Reject them here without consuming the code.
-        if (authCode.auth_method === 'external_auth' || isExpired(authCode.expires_at)) {
+        // Standalone Connect codes, and those from /oauth2/authorize's hosted sign-in, belong to
+        // /oauth2/token, which enforces the Connect client's authentication and redirect_uri.
+        // Reject them here without consuming the code.
+        if (authCode.auth_method === 'external_auth' || authCode.connect || isExpired(authCode.expires_at)) {
           failAuth(
             'OAuth',
             { userId: authCode.user_id, email: ws.users.get(authCode.user_id)?.email },
@@ -1064,7 +1089,9 @@ export function authRoutes(ctx: RouteContext): void {
         }
 
         const refreshToken = ws.refreshTokens.findOneBy('token', token);
-        if (!refreshToken) {
+        // A refresh token from /oauth2/token is that endpoint's to rotate: it carries a scope and
+        // resource this grant would drop, and belongs to a Connect client, not an AuthKit one.
+        if (!refreshToken || refreshToken.connect) {
           throw new OauthApiError(400, 'invalid_grant', 'Invalid refresh token.');
         }
         if (isExpired(refreshToken.expires_at)) {
@@ -1331,34 +1358,13 @@ export function authRoutes(ctx: RouteContext): void {
     // reuses the existing session, so it emits neither session.created nor an auth event.
     let session;
     if (isFreshLogin) {
-      const verifyEmail = authMethod === 'MagicAuth' && !user.email_verified;
-      if (verifyEmail) {
-        // A redeemed magic-auth code proves mailbox ownership; production marks the email
-        // verified via the standard update path, which emits user.updated. Folded into the
-        // sign-in write so it is one write, one event, and nothing persists before the
-        // template gate above — which keeps a failed render from implying a login that
-        // never completed.
-        ws.users.update(user.id, {
-          last_sign_in_at: new Date().toISOString(),
-          email_verified: true,
-        });
-      } else {
-        // No real attribute change: production stamps last_sign_in_at via a dedicated,
-        // silent updateWithSignIn path (a raw, debounced DB write) that bypasses the
-        // event-emitting update(), so a login fires session.created without a spurious
-        // user.updated. See https://github.com/workos/emulate/issues/55.
-        ws.users.updateSilent(user.id, { last_sign_in_at: new Date().toISOString() });
-      }
-      session = ws.sessions.insert({
-        object: 'session',
-        user_id: user.id,
-        organization_id: organizationId,
-        ip_address: requestIp,
-        user_agent: requestUserAgent,
-        auth_method: AUTH_METHOD_SESSION_VALUES[sessionAuthMethod ?? authMethod] ?? 'unknown',
-        status: 'active',
-        expires_at: expiresIn(30 * 24 * 60), // matches refresh token lifetime
-        ended_at: null,
+      session = startLoginSession(ws, {
+        user,
+        organizationId,
+        ipAddress: requestIp,
+        userAgent: requestUserAgent,
+        authMethod: sessionAuthMethod ?? authMethod,
+        verifyEmail: authMethod === 'MagicAuth' && !user.email_verified,
       });
     } else {
       const existing = refreshSessionId ? ws.sessions.get(refreshSessionId) : undefined;

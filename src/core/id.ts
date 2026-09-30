@@ -79,6 +79,7 @@ export const ID_PREFIXES = {
   role: 'role',
   permission: 'perm',
   role_permission: 'rp',
+  authkit_oauth_resource: 'authkit_oauth_resource',
   authorization_resource: 'authz_resource',
   role_assignment: 'role_assignment',
   audit_log_action: 'audit_action',
